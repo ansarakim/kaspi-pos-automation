@@ -7,6 +7,21 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
 
+// ── Railway/эфемерлі FS үшін: тұрақты болу үшін файлдарды ENV-тен сидтейміз ──
+// Секреттер репоға коммитенбейді — Railway ENV-де тұрады. Файл бұрыннан болса,
+// қайта жазбаймыз (жергілікті дамуды бұзбау үшін).
+const _seedFromEnv = (envVar, fileName) => {
+  const v = process.env[envVar];
+  if (!v) return;
+  const fp = path.join(ROOT_DIR, fileName);
+  if (fs.existsSync(fp)) return;
+  try { fs.writeFileSync(fp, v); console.log(`[SEED] ${fileName} ← ${envVar}`); }
+  catch (e) { console.error(`[SEED] ${fileName} қатесі:`, e.message); }
+};
+_seedFromEnv('KEYPAIR_JSON', 'keypair.json');
+_seedFromEnv('DEVICE_JSON', 'device.json');
+_seedFromEnv('WEBHOOKS_JSON', 'webhooks.json');
+
 export const PORT = process.env.PORT || 3000;
 
 // ─── ECDSA P-256 keypair (persisted to keypair.json) ───
