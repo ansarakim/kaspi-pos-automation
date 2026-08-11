@@ -23,13 +23,16 @@ const authSessions = new Map();
 
 router.post('/init', async (req, res) => {
   const session = createEmptySession();
+  // Парольсіз (SMS) ағынды қалау үшін ENV-мен басқарылады (KASPI_NOPASS=1 → OTP).
+  const NOPASS = process.env.KASPI_NOPASS || '0';
+  const SF = process.env.KASPI_SF || 'registration';
 
   try {
     const resp = await loggedFetch(`${KASPI_ENTRANCE_URL}/api/v1/entrance/step`, {
       method: 'POST',
       headers: {
         ...ENTRANCE_HEADERS_BASE,
-        Referer: `${KASPI_ENTRANCE_URL}/process/entrance/?auth=2&appBuild=${APP.build}&appVersion=${APP.version}&platformVersion=${APP.platformVer}&platformType=IOS&deviceBrand=${APP.brand}&deviceModel=${APP.model}&deviceId=${DEVICE.deviceId}&installId=${DEVICE.installId}&frontCameraAvailable=true&sf=registration&pc=KPEntrance&noPass=0`,
+        Referer: `${KASPI_ENTRANCE_URL}/process/entrance/?auth=2&appBuild=${APP.build}&appVersion=${APP.version}&platformVersion=${APP.platformVer}&platformType=IOS&deviceBrand=${APP.brand}&deviceModel=${APP.model}&deviceId=${DEVICE.deviceId}&installId=${DEVICE.installId}&frontCameraAvailable=true&sf=${SF}&pc=KPEntrance&noPass=${NOPASS}`,
         Cookie: entranceCookie(),
       },
       body: JSON.stringify({
@@ -45,9 +48,9 @@ router.post('/init', async (req, res) => {
           deviceId: DEVICE.deviceId,
           installId: DEVICE.installId,
           frontCameraAvailable: 'true',
-          sf: 'registration',
+          sf: SF,
           pc: 'KPEntrance',
-          noPass: '0',
+          noPass: NOPASS,
         },
         actType: 'Success',
       }),
@@ -156,6 +159,71 @@ router.post('/verify-otp', async (req, res) => {
     } else {
       res.json({ success: false, processId: session.processId, step: 'otp_response', body });
     }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════
+//  Step 2b — Submit login password (KPEnterLoginPassword)
+//  Kaspi аккаунтта пароль болса, send-phone SMS орнына KPEnterLoginPassword
+//  қайтарады. Парольді осында жібереміз. Одан кейін Kaspi не бірден finish,
+//  не 2FA үшін OTP (EnterOtp) сұрайды — соңғысы болса verify-otp шақырылады.
+// ═══════════════════════════════════════════════════
+
+router.post('/password', async (req, res) => {
+  const { password, processId } = req.body;
+  if (!password) return res.status(400).json({ error: 'password required' });
+  if (!processId) return res.status(400).json({ error: 'processId required' });
+
+  const session = authSessions.get(processId);
+  if (!session) return res.status(400).json({ error: 'Unknown processId. Call /api/auth/init first' });
+
+  try {
+    const resp = await loggedFetch(`${KASPI_ENTRANCE_URL}/api/v1/entrance/step`, {
+      method: 'POST',
+      headers: {
+        ...ENTRANCE_HEADERS_BASE,
+        Referer: `${KASPI_ENTRANCE_URL}/process/universal-enter-phone-number?pId=${session.processId}&firstPage=KPUniversalEnterPhoneNumber`,
+        Cookie: entranceCookie(session.userToken),
+      },
+      body: JSON.stringify({
+        meta: { pId: session.processId, sn: 'ViewEnterLoginPassword' },
+        data: { password },
+        actType: 'Success',
+      }),
+    });
+
+    const ut = extractUserToken(resp);
+    if (ut) session.userToken = ut;
+
+    const body = await resp.json();
+    const view = body.view?.code;
+
+    // Пароль қабылданды → тікелей аяқтау (жаңа құрылғы тіркеу)
+    if (body.data?.type === 'kpDeviceRegistration' || view === 'KPMobileCall') {
+      const finishResult = await doFinish(session);
+      authSessions.delete(processId);
+      return res.json({
+        success: true,
+        processId: session.processId,
+        step: 'finished',
+        message: 'Password verified and finish completed',
+        ...finishResult,
+      });
+    }
+    // Пароль дұрыс, бірақ Kaspi қосымша SMS (2FA) сұрайды → verify-otp шақыр
+    if (view === 'EnterOtp') {
+      return res.json({
+        success: true,
+        processId: session.processId,
+        step: 'need_otp',
+        desc: body.data?.desc,
+        view,
+      });
+    }
+    // Басқа жағдай (пароль қате / белгісіз көрініс) — диагностика үшін body қайтарамыз
+    return res.json({ success: false, processId: session.processId, step: 'password_response', view, body });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
